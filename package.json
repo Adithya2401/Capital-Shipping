@@ -1,0 +1,13 @@
+{
+  "name": "capital-records-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Capital Shipping Goodrich filing portal served for Render hosting",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
