@@ -171,7 +171,11 @@
     font-size: 12px; color: var(--muted); background: #eef4ff; border: 1px solid #dbe7ff; padding: 6px 10px; border-radius: 999px; font-weight: 600;
   }
 
-  .table-wrapper { overflow-x: auto; max-height: 650px; }
+  .table-wrapper { overflow: auto; max-height: none; }
+
+  .category-section { padding: 20px 24px; }
+  .category-section + .category-section { border-top: 1px solid var(--border); }
+  .category-section h2 { color: var(--navy); font-size: 15px; margin-bottom: 12px; }
 
   table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
   th {
@@ -295,11 +299,7 @@
       </div>
       <div class="table-wrapper" id="tableContainer"></div>
       <div class="pagination">
-        <div id="pageInfo">Page 1 of 1</div>
-        <div class="page-btns">
-          <button class="btn btn-reset" id="prevPage">Previous</button>
-          <button class="btn btn-reset" id="nextPage">Next</button>
-        </div>
+        <div id="pageInfo">All matching rows are displayed</div>
       </div>
     </div>
   </div>
@@ -354,8 +354,7 @@ const LIVE_REFRESH_MS = 10000;
 // Excel Search Application Code
 let masterData = [];
 let filteredData = [];
-let currentPage = 1;
-const pageSize = 100;
+let sheetColumns = {};
 
 function getSheetCsvUrl(sheetName) {
   if (!GOOGLE_SHEET_ID || GOOGLE_SHEET_ID === 'PASTE_YOUR_GOOGLE_SHEET_ID_HERE') {
@@ -375,6 +374,7 @@ async function loadDataset() {
   }
 
   try {
+    sheetColumns = {};
     const sheetResults = await Promise.all(
       SHEET_NAMES.map(async (sheetName) => {
         const url = getSheetCsvUrl(sheetName);
@@ -454,34 +454,45 @@ function parseSheetCsv(csvText, sheetName) {
     const workbook = XLSX.read(csvText, { type: 'string', raw: false });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '' });
-    if (!rows || rows.length <= 1) return [];
+    if (!rows || rows.length === 0) return [];
 
-    const headers = rows[0].map((header) => normalizeText(header).toLowerCase());
+    const allHeaders = rows[0].map((header, index) => normalizeText(header) || `Column ${index + 1}`);
+    const headerKey = header => header.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const serialColumnIndex = allHeaders.findIndex(header => /^(SL|SR|SERIAL)(NO|NUMBER)?$/.test(headerKey(header)));
+    const dashboardLinkIndexes = new Set();
+    allHeaders.forEach((header, index) => {
+      if (/back\s+to\s+selection\s+dashboard/i.test(header)) dashboardLinkIndexes.add(index);
+    });
+    allHeaders.forEach((_, index) => {
+      const values = rows.slice(1).map(row => normalizeText(row[index])).filter(Boolean);
+      if (values.length && values.every(value => /back\s+to\s+selection\s+dashboard/i.test(value))) {
+        dashboardLinkIndexes.add(index);
+      }
+    });
+    const visibleColumnIndexes = allHeaders.map((_, index) => index).filter(index =>
+      !dashboardLinkIndexes.has(index) && index !== serialColumnIndex
+    );
+    const displayHeaders = ['SL NO', ...visibleColumnIndexes.map(index => allHeaders[index])];
+    sheetColumns[sheetName] = displayHeaders;
+    if (rows.length <= 1) return [];
     const records = [];
 
     rows.slice(1).forEach((row) => {
       if (!row || !Array.isArray(row) || row.every((cell) => !normalizeText(cell))) return;
 
-      const obj = {};
-      headers.forEach((header, index) => {
-        obj[header] = normalizeText(row[index]);
+      const fields = {};
+      fields['SL NO'] = serialColumnIndex === -1
+        ? String(records.length + 1)
+        : normalizeText(row[serialColumnIndex]);
+      visibleColumnIndexes.forEach(index => {
+        const header = allHeaders[index];
+        const value = normalizeText(row[index]);
+        fields[header] = /back\s+to\s+selection\s+dashboard/i.test(value) ? '' : value;
       });
-
-      const refNo = obj['job no'] || obj['request id'] || obj['request no'] || obj['sb no'] || obj['reference no'] || obj['reference'] || obj['sl no'] || '';
-      const dateVal = obj['job date'] || obj['date'] || obj['sb date'] || obj['invoice date'] || '';
-      const invNo = obj['invoice no'] || obj['invoice number'] || obj['invoice'] || '';
-      const entity = obj['supplier'] || obj['entity name'] || obj['party name'] || obj['supplier / entity'] || obj['name'] || 'Goodrich Aerospace';
-      const status = obj['etp status'] || obj['status'] || 'Completed';
-
-      if (!refNo && !invNo && !entity && !dateVal) return;
 
       records.push({
         category: sheetName,
-        refNo: refNo || 'N/A',
-        date: dateVal || 'N/A',
-        invNo: invNo || 'N/A',
-        entity: entity || 'N/A',
-        status: status || 'Completed'
+        fields,
       });
     });
 
@@ -511,51 +522,29 @@ function renderTable() {
   const pageInfo = document.getElementById('pageInfo');
 
   updateLastUpdatedLabel();
-  countEl.innerText = `Showing ${filteredData.length.toLocaleString()} matching record(s)`;
+  countEl.innerText = `Showing all ${filteredData.length.toLocaleString()} matching row(s)`;
 
   if (filteredData.length === 0) {
     container.innerHTML = `<div class="empty-state">No filing records match your search criteria.</div>`;
-    pageInfo.innerText = "Page 0 of 0";
+    pageInfo.innerText = "No matching rows";
     return;
   }
 
-  const totalPages = Math.ceil(filteredData.length / pageSize);
-  if (currentPage > totalPages) currentPage = totalPages;
-  if (currentPage < 1) currentPage = 1;
-
-  const startIdx = (currentPage - 1) * pageSize;
-  const pageRecords = filteredData.slice(startIdx, startIdx + pageSize);
-
-  let html = `<table>
-    <thead>
-      <tr>
-        <th>Category</th>
-        <th>Reference / Job / Request ID</th>
-        <th>Date</th>
-        <th>Invoice Number</th>
-        <th>Supplier / Entity Name</th>
-        <th>Status</th>
-      </tr>
-    </thead>
-    <tbody>`;
-
-  pageRecords.forEach(item => {
-    const isCompleted = /completed|approved|issued/i.test(item.status);
-    const badgeClass = isCompleted ? 'badge-completed' : 'badge-pending';
-
-    html += `<tr>
-      <td><strong>${escapeHtml(item.category)}</strong></td>
-      <td>${escapeHtml(item.refNo)}</td>
-      <td>${escapeHtml(item.date)}</td>
-      <td>${escapeHtml(item.invNo)}</td>
-      <td>${escapeHtml(item.entity)}</td>
-      <td><span class="badge-status ${badgeClass}">${escapeHtml(item.status)}</span></td>
-    </tr>`;
+  let html = '';
+  SHEET_NAMES.forEach(category => {
+    const records = filteredData.filter(item => item.category === category);
+    if (!records.length) return;
+    const columns = sheetColumns[category] || Object.keys(records[0].fields);
+    html += `<section class="category-section">
+      <h2>${escapeHtml(category)} (${records.length.toLocaleString()} rows)</h2>
+      <table><thead><tr>${columns.map(column => `<th>${escapeHtml(column)}</th>`).join('')}</tr></thead><tbody>`;
+    records.forEach(item => {
+      html += `<tr>${columns.map(column => `<td>${escapeHtml(item.fields[column] ?? '')}</td>`).join('')}</tr>`;
+    });
+    html += `</tbody></table></section>`;
   });
-
-  html += `</tbody></table>`;
   container.innerHTML = html;
-  pageInfo.innerText = `Page ${currentPage} of ${totalPages} (${filteredData.length.toLocaleString()} total items)`;
+  pageInfo.innerText = `All ${filteredData.length.toLocaleString()} matching row(s) displayed`;
 }
 
 function filterRecords() {
@@ -569,19 +558,19 @@ function filterRecords() {
     if (category !== 'ALL' && item.category !== category) return false;
 
     if (search) {
-      const refText = (item.refNo || '').toLowerCase();
-      const invText = (item.invNo || '').toLowerCase();
-      const entityText = (item.entity || '').toLowerCase();
-      const matchSearch = refText.includes(search) || invText.includes(search) || entityText.includes(search);
+      const searchableText = Object.values(item.fields).join(' ').toLowerCase();
+      const matchSearch = searchableText.includes(search);
       if (!matchSearch) return false;
     }
 
-    const itemDate = normalizeDateString(item.date);
+    const itemDateValue = Object.entries(item.fields).find(([header]) => /^(SB\s*)?DATE$/i.test(header.trim()))?.[1] || '';
+    const itemDate = normalizeDateString(itemDateValue);
     if (startDate && itemDate && itemDate < startDate) return false;
     if (endDate && itemDate && itemDate > endDate) return false;
 
     if (status !== 'ALL') {
-      const isCompleted = /completed|approved|issued/i.test(item.status);
+      const statusValue = Object.entries(item.fields).find(([header]) => /ETP\s*STATUS|^STATUS$/i.test(header.trim()))?.[1] || '';
+      const isCompleted = /completed|approved|issued/i.test(statusValue);
       if (status === 'Completed' && !isCompleted) return false;
       if (status === 'Pending' && isCompleted) return false;
     }
@@ -589,7 +578,6 @@ function filterRecords() {
     return true;
   });
 
-  currentPage = 1;
   renderTable();
 }
 
@@ -608,15 +596,7 @@ function exportExcel() {
     return;
   }
 
-  const exportRows = filteredData.map(item => ({
-    "Filing Category": item.category,
-    "Reference / Request ID": item.refNo,
-    "Date": item.date,
-    "Invoice Number": item.invNo,
-    "Supplier / Entity": item.entity,
-    "Status": item.status
-  }));
-
+  const exportRows = filteredData.map(item => ({ 'Filing Category': item.category, ...item.fields }));
   const worksheet = XLSX.utils.json_to_sheet(exportRows);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "Filtered Filings");
@@ -641,9 +621,6 @@ document.getElementById('idSearch').addEventListener('input', filterRecords);
 document.getElementById('startDate').addEventListener('change', filterRecords);
 document.getElementById('endDate').addEventListener('change', filterRecords);
 document.getElementById('refreshBtn').addEventListener('click', () => loadDataset());
-
-document.getElementById('prevPage').addEventListener('click', () => { if(currentPage > 1) { currentPage--; renderTable(); } });
-document.getElementById('nextPage').addEventListener('click', () => { if(currentPage * pageSize < filteredData.length) { currentPage++; renderTable(); } });
 
 document.getElementById('resetBtn').addEventListener('click', resetFilters);
 
